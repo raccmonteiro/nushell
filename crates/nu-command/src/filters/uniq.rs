@@ -8,6 +8,8 @@ use nu_protocol::{
 };
 use std::collections::hash_map::IntoIter;
 use std::collections::HashMap;
+use std::hash::Hash;
+use crate::HashableValue;
 
 #[derive(Clone)]
 pub struct Uniq;
@@ -173,7 +175,7 @@ impl ValueCounter {
         vals_to_compare: Value,
         index: usize,
     ) -> Self {
-        ValueCounter {
+        let val_counter = ValueCounter {
             val,
             val_to_compare: if flag_ignore_case {
                 clone_to_lowercase(&vals_to_compare.with_span(Span::unknown()))
@@ -182,7 +184,8 @@ impl ValueCounter {
             },
             count: 1,
             index,
-        }
+        };
+        val_counter
     }
 }
 
@@ -213,39 +216,9 @@ fn clone_to_lowercase(value: &Value) -> Value {
     }
 }
 
-fn sort_attributes(val: Value) -> Value {
-    match val {
-        Value::Record { cols, vals, span } => {
-            let sorted = cols
-                .into_iter()
-                .zip(vals)
-                .sorted_by(|a, b| a.0.cmp(&b.0))
-                .collect_vec();
-
-            let sorted_cols = sorted.clone().into_iter().map(|a| a.0).collect_vec();
-            let sorted_vals = sorted
-                .into_iter()
-                .map(|a| sort_attributes(a.1))
-                .collect_vec();
-
-            Value::Record {
-                cols: sorted_cols,
-                vals: sorted_vals,
-                span,
-            }
-        }
-        Value::List { vals, span } => Value::List {
-            vals: vals.into_iter().map(sort_attributes).collect_vec(),
-            span,
-        },
-        other => other,
-    }
-}
-
-fn generate_key(item: &ValueCounter) -> String {
-    let value = sort_attributes(item.val_to_compare.clone()); //otherwise, keys could be different for Records
-    value_to_string(&value, Span::unknown())
-        .unwrap_or_else(|_| panic!("Could not convert to string: {:?}", value))
+fn generate_key(item: &ValueCounter) -> HashableValue {
+    let value = HashableValue::from_value_ignore_span(item.val_to_compare.clone(), Span::unknown(), true, true);
+    value.unwrap_or_else(|_| panic!("Could not convert to string: {:?}", item.val_to_compare))
 }
 
 fn generate_results_with_count(head: Span, uniq_values: Vec<ValueCounter>) -> Vec<Value> {
@@ -289,9 +262,10 @@ pub fn uniq(
         })
         .into_iter()
         .fold(
-            HashMap::<String, ValueCounter>::new(),
+            HashMap::<HashableValue, ValueCounter>::new(),
             |mut counter, item| {
-                let key = generate_key(&item);
+                let key = generate_key(&item);      //FIXME HashableValue is not working for HashMap !?
+                eprintln!("key: {:?}", key);
                 match counter.get_mut(&key) {
                     Some(x) => x.count += 1,
                     None => {
@@ -326,7 +300,7 @@ pub fn uniq(
     .set_metadata(metadata))
 }
 
-fn sort(iter: IntoIter<String, ValueCounter>) -> Vec<ValueCounter> {
+fn sort(iter: IntoIter<HashableValue, ValueCounter>) -> Vec<ValueCounter> {
     iter.map(|item| item.1)
         .sorted_by(|a, b| a.index.cmp(&b.index))
         .collect()

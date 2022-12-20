@@ -1,6 +1,8 @@
 use chrono::{DateTime, FixedOffset};
 use nu_protocol::{ShellError, Span, Value};
 use std::hash::{Hash, Hasher};
+use itertools::Itertools;
+use nu_json::from_value;
 
 /// A subset of [Value](crate::Value), which is hashable.
 /// And it means that we can put the value into something like [HashMap](std::collections::HashMap) or [HashSet](std::collections::HashSet)
@@ -47,6 +49,11 @@ pub enum HashableValue {
         val: Vec<u8>,
         span: Span,
     },
+    Record {
+        cols: Vec<String>,
+        vals: Vec<HashableValue>,
+        span: Span,
+    },
 }
 
 impl Default for HashableValue {
@@ -64,19 +71,66 @@ impl HashableValue {
     /// A `span` is required because when there is an error in value, it may not contain `span` field.
     ///
     /// If the given value is not hashable(mainly because of it is structured data), an error will returned.
+
     pub fn from_value(value: Value, span: Span) -> Result<Self, ShellError> {
+        Self::from_value_ignore_span(value, span, false, false)
+    }
+
+    fn get_span(span: Span, ignore_span: bool) -> Span {
+        if ignore_span {
+            Span::unknown()
+        }
+        else { span }
+    }
+
+    pub fn from_value_ignore_span(value: Value, span: Span, ignore_span: bool, ignore_order: bool) -> Result<Self, ShellError> {
+
         match value {
-            Value::Bool { val, span } => Ok(HashableValue::Bool { val, span }),
-            Value::Int { val, span } => Ok(HashableValue::Int { val, span }),
-            Value::Filesize { val, span } => Ok(HashableValue::Filesize { val, span }),
-            Value::Duration { val, span } => Ok(HashableValue::Duration { val, span }),
-            Value::Date { val, span } => Ok(HashableValue::Date { val, span }),
+            Value::Bool { val, span } => Ok(HashableValue::Bool { val, span: Self::get_span(span, ignore_span) }),
+            Value::Int { val, span } => Ok(HashableValue::Int { val, span: Self::get_span(span, ignore_span) }),
+            Value::Filesize { val, span } => Ok(HashableValue::Filesize { val, span: Self::get_span(span, ignore_span) }),
+            Value::Duration { val, span } => Ok(HashableValue::Duration { val, span: Self::get_span(span, ignore_span) }),
+            Value::Date { val, span } => Ok(HashableValue::Date { val, span: Self::get_span(span, ignore_span) }),
             Value::Float { val, span } => Ok(HashableValue::Float {
                 val: val.to_ne_bytes(),
                 span,
             }),
-            Value::String { val, span } => Ok(HashableValue::String { val, span }),
-            Value::Binary { val, span } => Ok(HashableValue::Binary { val, span }),
+            Value::String { val, span } => Ok(HashableValue::String { val, span: Self::get_span(span, ignore_span) }),
+            Value::Binary { val, span } => Ok(HashableValue::Binary { val, span: Self::get_span(span, ignore_span) }),
+            Value::Record { cols, vals, span } => {
+
+                eprintln!("Value::Record cols: {:?}", &cols);
+
+
+                let hashable_cols_vals = if ignore_order {
+
+                    let sorted = cols.clone().into_iter().zip(vals)
+                        .sorted_by(|a, b| {
+                            a.0.cmp(&b.0)
+                        })
+                        .collect_vec();
+
+                    eprintln!("Value::Record sorted: {:?}", sorted);
+
+                    let columns = sorted.clone().into_iter().map(|a| a.0.clone())
+                        .collect_vec();
+                    let vals = sorted.into_iter().map(|a| a.1.clone())
+                        .collect_vec();
+
+                    (columns, vals)
+
+                }
+                else {
+                    (cols, vals)
+                };
+
+                let hashable_vals = hashable_cols_vals.1.into_iter()
+                    .map(|v| HashableValue::from_value_ignore_span(v, span, ignore_span, ignore_order))
+                    .map(|res| res.unwrap())
+                    .collect_vec();
+
+                Ok(HashableValue::Record { cols: hashable_cols_vals.0, vals: hashable_vals, span: Self::get_span(span, ignore_span) })
+            },
 
             _ => {
                 let input_span = value.span().unwrap_or(span);
@@ -102,8 +156,32 @@ impl HashableValue {
             },
             HashableValue::String { val, span } => Value::String { val, span },
             HashableValue::Binary { val, span } => Value::Binary { val, span },
+            HashableValue::Record { cols, vals, span } => {
+
+                let values = vals.into_iter()
+                    .map(|v| v.into_value())
+                    .collect_vec();
+
+                Value::Record { cols, vals: values, span }
+            },
         }
     }
+}
+
+fn sort_by_column<'a>(cols: &'a Vec<String>, vals: &'a Vec<HashableValue>) -> (Vec<String>, Vec<&'a HashableValue>) {
+
+    let sorted = cols.into_iter().zip(vals)
+        .sorted_by(|a, b| {
+            a.0.cmp(&b.0)
+        })
+        .collect_vec();
+
+    let columns = sorted.clone().into_iter().map(|a| a.0.clone())
+        .collect_vec();
+    let vals = sorted.into_iter().map(|a| a.1)
+        .collect_vec();
+
+    (columns, vals)
 }
 
 impl Hash for HashableValue {
@@ -117,6 +195,16 @@ impl Hash for HashableValue {
             HashableValue::Float { val, .. } => val.hash(state),
             HashableValue::String { val, .. } => val.hash(state),
             HashableValue::Binary { val, .. } => val.hash(state),
+            HashableValue::Record { cols, vals, .. } => {
+
+                let cols_vals = sort_by_column(cols, vals);  //TODO not sure if this is really required
+                eprintln!("hash cols_vals: {:?}", &cols_vals);
+
+                let vals = cols_vals.1;
+                eprintln!("hash value: {:?}", vals.hash(state));
+
+                return vals.hash(state); //FIXME hash should use columns and values, I don't know how to do it
+            },
         }
     }
 }
